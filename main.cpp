@@ -2,6 +2,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <cstring>
 #include <unistd.h>
 #include <sstream>
 #include <ctime>
