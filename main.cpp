@@ -2,7 +2,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <zconf.h>
+#include <unistd.h>
+#include <sstream>
+#include <ctime>
 #include <errno.h>
 #include <stdio.h>
 #include <string>
@@ -30,8 +32,13 @@ int main(int argc, char *argv[]) {
     }
     char* filename=argv[4];
     FILE *f;
-    if(argc==6&&strcmp(argv[5],"-C")==0)
-        f=fopen(filename,"w");
+    time_t now=time(0);
+    char* timechar=ctime(&now);
+    printf("%s\n",timechar);
+    if(argc==6&&strcmp(argv[5],"-C")==0) {
+        f = fopen(filename, "w");
+        fputs(timechar,f);
+    }
     else
         f=fopen(filename,"a");
 
@@ -51,6 +58,9 @@ int main(int argc, char *argv[]) {
     struct timeval tvmsg;
     tvmsg.tv_sec=7;
     tvmsg.tv_usec=0;
+
+
+
 
     hp=gethostbyname(servname);
     if(!hp){
@@ -76,12 +86,13 @@ int main(int argc, char *argv[]) {
     sprintf(msg,"request:%d-%d",port,portend);
     if((sendto(streamfd, msg, strlen(msg), 0, (struct sockaddr*)&servaddr, servsocklen))<0){
         perror("Message sending error");
+        close(streamfd);
         return 0;
     }
     printf("Request sent:%d-%d\n",port,portend);
     memset(msg,0,BUFFSIZE);
     if((recvfrom(streamfd,msg,BUFFSIZE,0,(struct sockaddr*)&servaddr,&servsocklen))<0){
-        perror("Server ACK timeout.");
+        perror("NO ACK RECEIVED.");
         return 0;
     }
     if(strcmp(msg,"OK")!=0){
@@ -143,7 +154,7 @@ int main(int argc, char *argv[]) {
         }
         /*printf("Received message:%s\n",buf);*/
         //printf("Message in port %d: %s \n",port,buf);
-        //printf("Port %d is alive.\n", port);
+        printf("Port %d is alive.\n", port);
         memset(tofile,0,BUFFSIZE);
         sprintf(tofile,"%d\n", port);
         fputs(tofile,f);
