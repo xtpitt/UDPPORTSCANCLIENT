@@ -40,8 +40,12 @@ int main(int argc, char *argv[]) {
         f = fopen(filename, "w");
         fputs(timechar,f);
     }
-    else
+    else{
         f=fopen(filename,"a");
+        fputs(timechar,f);
+    }
+    char* portrange=NULL;
+
 
     struct hostent *hp;
     struct sockaddr_in servaddr, servudpaddr;
@@ -59,7 +63,7 @@ int main(int argc, char *argv[]) {
     struct timeval tvmsg;
     tvmsg.tv_sec=7;
     tvmsg.tv_usec=0;
-
+    string end="end\n";
 
 
 
@@ -79,12 +83,12 @@ int main(int argc, char *argv[]) {
         perror("Unable to start TCP msg socket");
         return -1;
     }
-
     if(connect(streamfd,(struct sockaddr*)&servaddr, sizeof(servaddr))<0){
         perror("Server is not open");
         return 0;
     }
-    sprintf(msg,"request:%d-%d",port,portend);
+    sprintf(msg,"request:%d-%d\n",port,portend);
+    fputs(msg,f);
     if((sendto(streamfd, msg, strlen(msg), 0, (struct sockaddr*)&servaddr, servsocklen))<0){
         perror("Message sending error");
         close(streamfd);
@@ -121,6 +125,9 @@ int main(int argc, char *argv[]) {
             fclose(f);
             printf("Server says end.\n");
             printf("Last scanned port %d.\n", port);
+            fputs(end.c_str(),f);
+            fclose(f);
+            close(streamfd);
             return 0;
         }else{
             port=atoi(msg);
@@ -166,6 +173,7 @@ int main(int argc, char *argv[]) {
     }
     delete test;
     printf("Scanning Request Ends.\n");
+    fputs(end.c_str(),f);
     fclose(f);
     close(streamfd);
     return 0;
