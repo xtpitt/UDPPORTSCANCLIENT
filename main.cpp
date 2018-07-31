@@ -5,48 +5,57 @@
 #include <cstring>
 #include <unistd.h>
 #include <sstream>
+#include <thread>
+#include <numeric>
+#include <chrono>
 #include <ctime>
 #include <errno.h>
 #include <stdio.h>
 #include <string>
 
 #define BUFFSIZE 64
+#define PKTBUFSIZE 1000
 #define TIMEOUT_MS 3500
 #define SERVERPORT 50025
+#define SPEEDPORT 50027
+#define DROPTHRESHOLD 0.1
+#define INTAJDTHRESHOLD 6
+#define BASEINTERVAL 80
+#define PORTALLO 10
 using namespace std;
-int main(int argc, char *argv[]) {
-    int fd,streamfd;
-    if(argc<5){
-        perror("Invalid number of arguments");
-        return 0;
-    }
-    char* servname=argv[1];
+int portscanstatus=-1;//only -1, 0, 1 is in use.
+/*
+ * -1: portscan not yet start
+ * 0:  portscan ended
+ * 1:  portscan begin
+ * */
+struct portscandata{
     int port;
     int portend;
-    if(argv[2]<=argv[3]){
-        port=atoi(argv[2]);
-        portend=atoi(argv[3]);
-    }
-    else{
-        port=atoi(argv[2]);
-        portend=atoi(argv[3]);
-    }
-    char* filename=argv[4];
+    char* servname;
     FILE *f;
-    time_t now=time(0);
-    char* timechar=ctime(&now);
-    printf("%s\n",timechar);
-    if(argc==6&&strcmp(argv[5],"-C")==0) {
-        f = fopen(filename, "w");
-        fputs(timechar,f);
-    }
-    else{
-        f=fopen(filename,"a");
-        fputs(timechar,f);
-    }
-    char* portrange=NULL;
-
-
+};
+struct speedtestdata{
+    char* servname;
+};
+struct upltestdata{
+    sockaddr_in addr;
+    int port;
+    int sfd;
+    int fd;
+};
+struct dnltestdata{
+    sockaddr_in addr;
+    int port;
+    int sfd;
+    int fd;
+};
+int portscanclient(struct portscandata* psd){
+    int fd,streamfd;
+    FILE *f=psd->f;
+    char* servname=psd->servname;
+    int port=psd->port;
+    int portend=psd->portend;
     struct hostent *hp;
     struct sockaddr_in servaddr, servudpaddr;
     socklen_t servsocklen=sizeof(servaddr);
@@ -64,8 +73,6 @@ int main(int argc, char *argv[]) {
     tvmsg.tv_sec=7;
     tvmsg.tv_usec=0;
     string end="end\n";
-
-
 
     hp=gethostbyname(servname);
     if(!hp){
@@ -105,10 +112,13 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     //begin scanning
+    portscanstatus=1;
     printf("Scanning begin:\n");
     char tofile[BUFFSIZE];
     char* test=new char;
-    bool inital=true;
+    int total=portend-port+1;
+    int count=0;
+    double totaldelay=0;
     while(port<=portend){
         /*if(port==SERVERPORT) {//avoid the server message port;
             ++port;
@@ -154,27 +164,376 @@ int main(int argc, char *argv[]) {
             close(fd);
             continue;
         }
+        auto start = std::chrono::system_clock::now();
         if((recvfrom(fd,buf, BUFFSIZE, 0, (struct sockaddr*)&servudpaddr, &servudpsocklen))<=0){
             //++port;
             close(fd);
             continue;
 
         }
+        auto end = std::chrono::system_clock::now();
+        std::chrono::duration<double> diff = end-start;
         /*printf("Received message:%s\n",buf);*/
         //printf("Message in port %d: %s \n",port,buf);
-        printf("Port %d is alive.\n", port);
+        //printf("Port %d is alive. Measured Delay: %fms.\n", port, 1000*diff.count());
         memset(tofile,0,BUFFSIZE);
         sprintf(tofile,"%d\n", port);
         fputs(tofile,f);
+        count++;
+        totaldelay+=1000*diff.count();
         close(fd);
         if(port==portend)
             break;
-        /*Some system has rate limitation*/
     }
     delete test;
+    printf("%d/%d ports reported open.\n", count, total);
+    printf("Average Delay: %fms.\n", totaldelay/count);
     printf("Scanning Request Ends.\n");
+    portscanstatus=0;
     fputs(end.c_str(),f);
     fclose(f);
     close(streamfd);
     return 0;
+}
+void randpayloadset(char* payload, size_t len){
+    srand(time(NULL));
+    for(int i=0; i<len;++i){
+        *(payload+i)=(char)(rand()%256);
+    }
+}
+int upltestthread(struct upltestdata *uptd){
+    int fd=uptd->fd;
+    sockaddr_in addr=uptd->addr;
+    socklen_t socklen= sizeof(addr);
+    int sfd=uptd->sfd;
+    bool go_on=true;
+
+    return 0;
+
+}
+int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, struct timeval tv0){
+    int readlen=0, count=0;
+    char buf[PKTBUFSIZE];
+    fd_set udpreadset, tcpreadset;
+    int ures=0,tres=0;
+    socklen_t udpaddrlen= sizeof(*udpaddr);
+    auto tickcount=std::chrono::system_clock::now();
+    auto ticknow=std::chrono::system_clock::now();
+    std::chrono::duration<double> timeout;
+    while(1){
+        count=0;
+        do {
+            memset(buf, 0, PKTBUFSIZE);
+            FD_ZERO(&udpreadset);
+            FD_SET(udpfd, &udpreadset);
+            ures=select(udpfd + 1, &udpreadset, NULL, NULL, &tv0);
+            if(ures<0){
+                perror("udpsocket");
+            }
+            else if(ures>0){
+                if(FD_ISSET(udpfd, &udpreadset)){
+                    readlen=recvfrom(udpfd, buf, PKTBUFSIZE, 0, (sockaddr*)udpaddr, &udpaddrlen);
+                    if(readlen==PKTBUFSIZE){
+                        count++;
+                    }
+                    else if(readlen>0){
+                        printf("%d Partial reception???\n", readlen);
+                    }
+                }
+            }
+            //select works not well
+            FD_ZERO(&tcpreadset);
+            FD_SET(sfd, &tcpreadset);
+            tres = select(sfd + 1, &tcpreadset, NULL, NULL, &tv0);
+        } while ((tres==-1 &&errno==EINTR)||tres == 0);
+        //process http packet if
+        memset(msgbuf,0 ,BUFFSIZE);
+        //FIXME: We didn't check the FD_ISSET as only 1 socket is detected.
+        int l=recvfrom(sfd, msgbuf, BUFFSIZE, 0, NULL, NULL);
+        if(l<0){
+            perror("error receiving test messages");
+            //FIXME: How to handle;
+        }
+        if(strcmp((char*)msgbuf,"testu")==0){
+            memset(msgbuf, 0, BUFFSIZE);
+            memcpy(msgbuf,&count, sizeof(count));
+            if(sendto(sfd,msgbuf, sizeof(count), 0, NULL, 0)<0){
+                perror("error sending recv speed test feedback\n");
+                close(sfd);
+                close(udpfd);
+                return -1;
+            }
+        }
+        else{//process result;
+            double rate, lossrate;
+            memcpy(&rate, msgbuf, sizeof(rate));
+            memcpy(&lossrate, msgbuf+sizeof(rate), sizeof(lossrate));
+            char output[BUFFSIZE];
+            sprintf((char*)output,"Download Rate: %f kbps.\n", rate);
+            printf(output);
+            sprintf((char*)output,"Download packet loss rate %f.\n", lossrate);
+            printf(output);
+            break;
+        }
+    }
+    printf("Speedtest download completed.\n");
+    return 0;
+}
+int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
+    char ubuf[PKTBUFSIZE];
+    randpayloadset((char*)ubuf, PKTBUFSIZE);
+    auto start = std::chrono::system_clock::now();
+    auto end=std::chrono::system_clock::now();
+    std::chrono::duration<double> diff = end-start;
+    std::chrono::duration<double> diff2;
+    socklen_t socklen=sizeof(*addr);
+    uint64_t count=0;
+    uint64_t loss=0;
+    double lossbalance=0;
+    int intadjcount=0;
+    int waveloss=0;
+    double sumtime=0;
+    int temp=1000;
+    int quote;
+    int feedback;
+    int sentl=0;
+    double rate=0;
+    string proceedstr="proceed";
+    string testu="testu";
+    string endstr="end";
+    double adaptivesleep=BASEINTERVAL;
+    printf("Entering upload testing cycle.\n");
+    while(diff.count()<3){//default timeout 30s
+        quote=temp;
+        auto tick1=std::chrono::system_clock::now();
+        while(quote>0){
+            sentl=sendto(udpfd,ubuf,PKTBUFSIZE,0,(sockaddr*)addr, socklen);
+            if(sentl<=0) {
+                perror("Uplink speed testing udp broken");
+            }
+            else{
+                count++;
+                quote--;
+            }
+            usleep(adaptivesleep);
+        }
+        auto tick2=std::chrono::system_clock::now();
+        diff2 = tick2-tick1;
+        sumtime+=diff2.count();
+        //send current sent quote to tcp socket
+        memset(msg,0,BUFFSIZE);
+        if((sendto(streamfd, testu.c_str(), sizeof(testu), 0, NULL, 0))<0){
+            perror("Message sending error: upload continue message");
+            close(streamfd);
+            close(udpfd);
+            return -1;
+        }
+        memset(msg,0,BUFFSIZE);
+        if((recvfrom(streamfd, msg, sizeof(feedback),0,NULL, NULL))<0){
+            perror("NO FEEDBACK RECEIVED");
+            close(streamfd);
+            close(udpfd);
+            return -1;
+        }
+        //get result;
+        memcpy(&feedback,msg, sizeof(feedback));
+        //compute loss;
+        waveloss=temp-feedback;
+        loss+=waveloss;
+        if(feedback>temp){
+            printf("Some packet out of sequence\n");
+        }
+        if(waveloss>=0){
+            lossbalance=lossbalance+(waveloss-lossbalance)/8;
+        }
+        //adjust timer
+        if(lossbalance>DROPTHRESHOLD*temp && waveloss>DROPTHRESHOLD*temp&& intadjcount<INTAJDTHRESHOLD){
+            adaptivesleep*=2;
+            intadjcount++;
+        }
+        if(waveloss==0){
+            if(intadjcount>0)
+                intadjcount--;
+            if(adaptivesleep>BASEINTERVAL*1.2)
+                adaptivesleep=adaptivesleep/1.2;
+            else
+                adaptivesleep=BASEINTERVAL;
+        }
+        end=std::chrono::system_clock::now();
+        diff=end-start;
+        //printf("%f\n", diff.count());
+    }
+    printf("Upload speed test cycle finished\n");
+    memset(msg,0,BUFFSIZE);
+    if((sendto(streamfd, proceedstr.c_str(), sizeof(proceedstr), 0, NULL, 0))<0){
+        perror("Message sending error: Upload test end/proceed to next message not sent.\n");
+        close(streamfd);
+        close(udpfd);
+        return -1;
+    }
+
+    rate=count*8/sumtime;
+    char output[BUFFSIZE];
+    sprintf((char*)output,"Upload Rate: %f kbps.\n", rate);
+    printf(output);
+    sprintf((char*)output,"Upload packet loss rate %f.\n", (double)loss/count);
+    printf(output);
+}
+int speedtestclient(struct speedtestdata* psd){
+    int streamfd;
+    char* servname=psd->servname;
+    struct hostent *hp;
+    struct sockaddr_in servaddr, servudpaddr;
+    socklen_t servsocklen=sizeof(servaddr);
+    socklen_t servudpsocklen=sizeof(servudpaddr);
+    int opt=1;
+    unsigned char buf[BUFFSIZE];
+    /*Set two timers for each session*/
+    struct timeval tv1;
+    tv1.tv_sec=0;
+    tv1.tv_usec=0;
+    hp=gethostbyname(servname);
+    if(!hp){
+        perror("Host not found");
+        return -1;
+    }
+    //begin send message
+    memset(buf,0,BUFFSIZE);
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family=AF_INET;
+    servaddr.sin_port=htons(SPEEDPORT);
+    memcpy((void *)&servaddr.sin_addr,hp->h_addr_list[0], hp->h_length);
+    char msg[BUFFSIZE];
+    if((streamfd=socket(AF_INET,SOCK_STREAM,0))<0){
+        perror("Unable to start TCP msg socket");
+        delete psd;
+        return -1;
+    }
+    if(connect(streamfd,(struct sockaddr*)&servaddr, servsocklen)<0){
+        perror("Server is not open");
+        close(streamfd);
+        delete psd;
+        return 0;
+    }
+    string startmsg="start";
+    if((sendto(streamfd, startmsg.c_str(), sizeof(startmsg), 0, NULL, 0))<0){
+        perror("Message sending error: upload start message");
+        close(streamfd);
+        delete psd;
+        return 0;
+    }
+    printf("SpeedTest Start Sent.\n");
+    memset(msg,0,BUFFSIZE);
+    if((recvfrom(streamfd,msg,BUFFSIZE,0, NULL, NULL))<0){
+        perror("NO ACK RECEIVED.");
+        close(streamfd);
+        delete psd;
+        return 0;
+    }
+    if(strcmp(msg,"NACK")==0){
+        perror("Server Replied NACK. STOP.\n");
+        close(streamfd);
+        delete psd;
+        return 0;
+    }
+    //
+    int udpport;
+    char *pivot=strstr((char *)msg,":");
+    if(pivot==NULL){
+        perror("UDP PORT message wrong format.\n");
+        close(streamfd);
+        delete psd;
+        return 0;
+    }
+    else{
+        udpport=atoi(pivot+1);
+    }
+    printf("Received UDP SPEED TESTING PORT %d.\n", udpport);
+
+    //initial an upload thread data;
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family=AF_INET;
+    addr.sin_port=htons(udpport);
+    memcpy((void *)&addr.sin_addr,hp->h_addr_list[0], hp->h_length);
+    socklen_t socklen=sizeof(addr);
+    //initiate udp sockets speed testing
+    int udpfd;
+    if((udpfd=socket(AF_INET,SOCK_DGRAM,0))<0){
+        perror("Unable to start UDP socket");
+        close(streamfd);
+        close(udpfd);
+        delete psd;
+        return 0;
+    }
+    if((setsockopt(udpfd,SOL_SOCKET, SO_RCVTIMEO,&tv1, sizeof(tv1)))<0){
+        perror("error setting recv timout");
+        delete psd;
+        close(streamfd);
+        close(udpfd);
+        return 0;
+    }
+    //Begin sending process
+    if(speedtestsend_c(udpfd, &addr, streamfd,(char*)msg)<0){
+        delete psd;
+        close(streamfd);
+        close(udpfd);
+        return 0;
+    }
+    //try download speed;
+    if(speedtestrecv_c(udpfd, &addr, streamfd, (char*)msg, tv1)<0){
+        delete psd;
+        close(streamfd);
+        close(udpfd);
+        return 0;
+    }
+
+    close(streamfd);
+    close(udpfd);
+    delete psd;
+    return 0;
+
+}
+int main(int argc, char *argv[]) {
+    if(argc<5){
+        perror("Invalid number of arguments");
+        return 0;
+    }
+    char* servname=argv[1];
+    int port;
+    int portend;
+    if(argv[2]<=argv[3]){
+        port=atoi(argv[2]);
+        portend=atoi(argv[3]);
+    }
+    else{
+        port=atoi(argv[2]);
+        portend=atoi(argv[3]);
+    }
+    char* filename=argv[4];
+    FILE *f;
+    time_t now=time(0);
+    char* timechar=ctime(&now);
+    printf("%s\n",timechar);
+    if(argc==6&&strcmp(argv[5],"-C")==0) {
+        f = fopen(filename, "w");
+        fputs(timechar,f);
+    }
+    else{
+        f=fopen(filename,"a");
+        fputs(timechar,f);
+    }
+    //activate speedtest client
+    struct speedtestdata* sptd= new struct speedtestdata;
+    sptd->servname=servname;
+    std::thread sptclient(speedtestclient, sptd);
+    sptclient.join();
+    //activate portscanclient
+    struct portscandata* psd= new struct portscandata;
+    psd->port=port;
+    psd->portend=portend;
+    psd->servname=servname;
+    psd->f=f;
+    std::thread psclient(portscanclient,psd);
+    psclient.join();
 }
