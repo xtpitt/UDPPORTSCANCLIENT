@@ -19,8 +19,11 @@
 #define SERVERPORT 50025
 #define SPEEDPORT 50027
 #define DROPTHRESHOLD 0.1
-#define INTAJDTHRESHOLD 6
+#define DROPTHRURGENT 0.35
+#define INTAJDTHRESHOLD 40
 #define BASEINTERVAL 80
+#define DEFINTERVAL 15000
+#define SPTTIMEOUT 10
 #define PORTALLO 10
 using namespace std;
 int portscanstatus=-1;//only -1, 0, 1 is in use.
@@ -119,6 +122,8 @@ int portscanclient(struct portscandata* psd){
     int total=portend-port+1;
     int count=0;
     double totaldelay=0;
+    double prevdelay=-1;
+    double jitter=0;
     while(port<=portend){
         /*if(port==SERVERPORT) {//avoid the server message port;
             ++port;
@@ -181,6 +186,9 @@ int portscanclient(struct portscandata* psd){
         fputs(tofile,f);
         count++;
         totaldelay+=1000*diff.count();
+        if(prevdelay!=-1)
+            jitter+=1000*diff.count()-prevdelay>0 ? 1000*diff.count()-prevdelay : prevdelay-1000*diff.count();
+        prevdelay=1000*diff.count();
         close(fd);
         if(port==portend)
             break;
@@ -188,6 +196,7 @@ int portscanclient(struct portscandata* psd){
     delete test;
     printf("%d/%d ports reported open.\n", count, total);
     printf("Average Delay: %fms.\n", totaldelay/count);
+    printf("Average Jitter: %fms.\n", jitter/count);
     printf("Scanning Request Ends.\n");
     portscanstatus=0;
     fputs(end.c_str(),f);
@@ -301,9 +310,9 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
     string proceedstr="proceed";
     string testu="testu";
     string endstr="end";
-    double adaptivesleep=BASEINTERVAL;
+    double adaptivesleep=DEFINTERVAL;
     printf("Entering upload testing cycle.\n");
-    while(diff.count()<3){//default timeout 30s
+    while(diff.count()<SPTTIMEOUT){//default timeout 30s
         quote=temp;
         auto tick1=std::chrono::system_clock::now();
         while(quote>0){
@@ -349,6 +358,10 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
         //adjust timer
         if(lossbalance>DROPTHRESHOLD*temp && waveloss>DROPTHRESHOLD*temp&& intadjcount<INTAJDTHRESHOLD){
             adaptivesleep*=2;
+            intadjcount++;
+        }
+        if(lossbalance>DROPTHRURGENT*temp && waveloss>DROPTHRURGENT*temp&& intadjcount<INTAJDTHRESHOLD){
+            adaptivesleep*=8;
             intadjcount++;
         }
         if(waveloss==0){
