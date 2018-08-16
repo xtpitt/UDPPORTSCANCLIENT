@@ -27,7 +27,7 @@
 #define INTAJDTHRESHOLD 40
 #define BASEINTERVAL 80
 #define DEFINTERVAL 1000
-#define SPTTIMEOUT 180
+#define SPTTIMEOUT 80
 #define PORTALLO 10
 using namespace std;
 int portscanstatus=-1;//only -1, 0, 1 is in use.
