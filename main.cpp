@@ -620,7 +620,7 @@ int main(int argc, char *argv[]) {
         fputs(timechar,f);
     }
     //activate speedtest client
-    int timeout=120;
+    int timeout=80;
     struct speedtestdata* sptd= new struct speedtestdata;
     sptd->servname=servname;
     sptd->dltimeout=timeout;
