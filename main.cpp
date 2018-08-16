@@ -1,6 +1,9 @@
 #include <iostream>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/time.h>
+#include <sys/select.h>
+#include <sys/socket.h>
 #include <netdb.h>
 #include <cstring>
 #include <unistd.h>
@@ -12,6 +15,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string>
+#include "gnuplot-iostream.h"
 
 #define BUFFSIZE 64
 #define PKTBUFSIZE 1000
@@ -22,8 +26,8 @@
 #define DROPTHRURGENT 0.35
 #define INTAJDTHRESHOLD 40
 #define BASEINTERVAL 80
-#define DEFINTERVAL 15000
-#define SPTTIMEOUT 10
+#define DEFINTERVAL 1000
+#define SPTTIMEOUT 180
 #define PORTALLO 10
 using namespace std;
 int portscanstatus=-1;//only -1, 0, 1 is in use.
@@ -40,6 +44,7 @@ struct portscandata{
 };
 struct speedtestdata{
     char* servname;
+    int dltimeout;
 };
 struct upltestdata{
     sockaddr_in addr;
@@ -52,6 +57,29 @@ struct dnltestdata{
     int port;
     int sfd;
     int fd;
+};
+class Plotter{
+private:
+    vector<double> vec1;
+    vector<double> vec2;
+    int count=500;
+    string title;
+public:
+    void setTitle(string s){
+        this->title=s;
+    }
+    pair<vector<double>, vector<double>> getPlotData(){
+        return make_pair(vec1,vec2);
+    };
+    void appendData(double data1, double data2){
+        int l=vec1.size();
+        if(l==count){
+            vec1.erase(vec1.begin());
+            vec2.erase(vec2.begin());
+        }
+        vec1.push_back(data1);
+        vec2.push_back(data2);
+    }
 };
 int portscanclient(struct portscandata* psd){
     int fd,streamfd;
@@ -193,7 +221,7 @@ int portscanclient(struct portscandata* psd){
         if(port==portend)
             break;
     }
-    delete test;
+
     printf("%d/%d ports reported open.\n", count, total);
     printf("Average Delay: %fms.\n", totaldelay/count);
     printf("Average Jitter: %fms.\n", jitter/count);
@@ -202,6 +230,7 @@ int portscanclient(struct portscandata* psd){
     fputs(end.c_str(),f);
     fclose(f);
     close(streamfd);
+    delete test;
     return 0;
 }
 void randpayloadset(char* payload, size_t len){
@@ -228,7 +257,14 @@ int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, stru
     socklen_t udpaddrlen= sizeof(*udpaddr);
     auto tickcount=std::chrono::system_clock::now();
     auto ticknow=std::chrono::system_clock::now();
-    std::chrono::duration<double> timeout;
+    auto pipetimeout=std::chrono::system_clock::now();
+    std::chrono::duration<double> diff;
+    double timeline=0;
+    double roundtime;
+    double dt;
+    Gnuplot g_down;
+    vector<double> vec1;
+    vector<double> vec2;
     while(1){
         count=0;
         do {
@@ -254,16 +290,27 @@ int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, stru
             FD_ZERO(&tcpreadset);
             FD_SET(sfd, &tcpreadset);
             tres = select(sfd + 1, &tcpreadset, NULL, NULL, &tv0);
+
         } while ((tres==-1 &&errno==EINTR)||tres == 0);
+        ticknow=std::chrono::system_clock::now();
         //process http packet if
         memset(msgbuf,0 ,BUFFSIZE);
         //FIXME: We didn't check the FD_ISSET as only 1 socket is detected.
         int l=recvfrom(sfd, msgbuf, BUFFSIZE, 0, NULL, NULL);
-        if(l<0){
+        if(l<=0){
             perror("error receiving test messages");
             //FIXME: How to handle;
         }
-        if(strcmp((char*)msgbuf,"testu")==0){
+        diff=ticknow-tickcount;
+        dt=diff.count()-timeline;
+        //printf("%f %d\n",timeline, count*8);
+
+        char* pivot;
+        pivot=strstr(msgbuf,"testu:");
+        if(pivot==msgbuf){
+            //extract statistics
+            memcpy(&timeline,msgbuf+strlen("testu:"), sizeof(timeline));
+            memcpy(&roundtime,msgbuf+strlen("testu:")+sizeof(timeline), sizeof(roundtime));
             memset(msgbuf, 0, BUFFSIZE);
             memcpy(msgbuf,&count, sizeof(count));
             if(sendto(sfd,msgbuf, sizeof(count), 0, NULL, 0)<0){
@@ -284,17 +331,27 @@ int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, stru
             printf(output);
             break;
         }
+        vec1.push_back(timeline);
+        vec2.push_back(count*8/roundtime);
+        g_down <<"set title'Downlink Bandwidth Test'\n";
+        g_down <<"set xlabel 'Time(s)'\n";
+        g_down <<"set ylabel 'Bandwidth kbps'\n";
+        g_down <<"set key right bottom\n";
+        g_down <<"plot '-' using 1:2 w lines tit 'Downlink Bandwidth'\n";
+        g_down.send1d(make_pair(vec1,vec2));
+        g_down.flush();
     }
     printf("Speedtest download completed.\n");
     return 0;
 }
-int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
+int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int timeout){
     char ubuf[PKTBUFSIZE];
     randpayloadset((char*)ubuf, PKTBUFSIZE);
     auto start = std::chrono::system_clock::now();
     auto end=std::chrono::system_clock::now();
     std::chrono::duration<double> diff = end-start;
     std::chrono::duration<double> diff2;
+    std::chrono::duration<double> timeline;
     socklen_t socklen=sizeof(*addr);
     uint64_t count=0;
     uint64_t loss=0;
@@ -311,8 +368,15 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
     string testu="testu";
     string endstr="end";
     double adaptivesleep=DEFINTERVAL;
+    Plotter pu;
+    pu.setTitle("Upload");
+    vector<double> vec1;
+    vector<double> vec2;
     printf("Entering upload testing cycle.\n");
-    while(diff.count()<SPTTIMEOUT){//default timeout 30s
+    Gnuplot g_up;
+    if(timeout<SPTTIMEOUT)
+        timeout=SPTTIMEOUT;
+    while(diff.count()<timeout){//default timeout 30s
         quote=temp;
         auto tick1=std::chrono::system_clock::now();
         while(quote>0){
@@ -324,14 +388,15 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
                 count++;
                 quote--;
             }
-            usleep(adaptivesleep);
+            std::this_thread::sleep_for(std::chrono::microseconds((int)adaptivesleep));
+            //usleep(adaptivesleep);
         }
         auto tick2=std::chrono::system_clock::now();
         diff2 = tick2-tick1;
         sumtime+=diff2.count();
         //send current sent quote to tcp socket
         memset(msg,0,BUFFSIZE);
-        if((sendto(streamfd, testu.c_str(), sizeof(testu), 0, NULL, 0))<0){
+        if((sendto(streamfd, testu.c_str(), strlen(testu.c_str()), 0, NULL, 0))<0){
             perror("Message sending error: upload continue message");
             close(streamfd);
             close(udpfd);
@@ -348,6 +413,18 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
         memcpy(&feedback,msg, sizeof(feedback));
         //compute loss;
         waveloss=temp-feedback;
+        //pu.appendData(sumtime,feedback*8/diff2.count());
+        timeline=tick2-start;
+        vec1.push_back(timeline.count());
+        vec2.push_back(feedback*8/diff2.count());
+        //plot data
+        g_up <<"set title'Uplink Bandwidth Test'\n";
+        g_up <<"set xlabel 'Time(s)'\n";
+        g_up <<"set ylabel 'Bandwidth kbps'\n";
+        g_up <<"set key right bottom\n";
+        g_up <<"plot '-' using 1:2 w lines tit 'Uplink Bandwidth'\n";
+        g_up.send1d(make_pair(vec1,vec2));
+        g_up.flush();
         loss+=waveloss;
         if(feedback>temp){
             printf("Some packet out of sequence\n");
@@ -377,8 +454,13 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
         //printf("%f\n", diff.count());
     }
     printf("Upload speed test cycle finished\n");
+
+
+    proceedstr+=":";
     memset(msg,0,BUFFSIZE);
-    if((sendto(streamfd, proceedstr.c_str(), sizeof(proceedstr), 0, NULL, 0))<0){
+    memcpy(msg,proceedstr.c_str(), strlen(proceedstr.c_str()));
+    memcpy(msg+strlen(proceedstr.c_str()), &timeout, sizeof(timeout));
+    if((sendto(streamfd, msg, strlen(proceedstr.c_str())+sizeof(timeout), 0, NULL, 0))<0){
         perror("Message sending error: Upload test end/proceed to next message not sent.\n");
         close(streamfd);
         close(udpfd);
@@ -394,6 +476,7 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg){
 }
 int speedtestclient(struct speedtestdata* psd){
     int streamfd;
+    int dltimeout=psd->dltimeout;
     char* servname=psd->servname;
     struct hostent *hp;
     struct sockaddr_in servaddr, servudpaddr;
@@ -429,7 +512,7 @@ int speedtestclient(struct speedtestdata* psd){
         return 0;
     }
     string startmsg="start";
-    if((sendto(streamfd, startmsg.c_str(), sizeof(startmsg), 0, NULL, 0))<0){
+    if((sendto(streamfd, startmsg.c_str(), strlen(startmsg.c_str()), 0, NULL, 0))<0){
         perror("Message sending error: upload start message");
         close(streamfd);
         delete psd;
@@ -487,7 +570,7 @@ int speedtestclient(struct speedtestdata* psd){
         return 0;
     }
     //Begin sending process
-    if(speedtestsend_c(udpfd, &addr, streamfd,(char*)msg)<0){
+    if(speedtestsend_c(udpfd, &addr, streamfd,(char*)msg, dltimeout)<0){
         delete psd;
         close(streamfd);
         close(udpfd);
@@ -537,8 +620,10 @@ int main(int argc, char *argv[]) {
         fputs(timechar,f);
     }
     //activate speedtest client
+    int timeout=120;
     struct speedtestdata* sptd= new struct speedtestdata;
     sptd->servname=servname;
+    sptd->dltimeout=timeout;
     std::thread sptclient(speedtestclient, sptd);
     sptclient.join();
     //activate portscanclient
