@@ -19,12 +19,13 @@
 
 #define BUFFSIZE 64
 #define PKTBUFSIZE 1000
+#define WAVEQUOTE 600
 #define TIMEOUT_MS 3500
 #define SERVERPORT 50025
 #define SPEEDPORT 50027
-#define DROPTHRESHOLD 0.1
-#define DROPTHRURGENT 0.35
-#define INTAJDTHRESHOLD 40
+#define DROPTHRESHOLD 0.01
+#define DROPTHRURGENT 0.02
+#define INTAJDTHRESHOLD 8
 #define BASEINTERVAL 80
 #define DEFINTERVAL 1000
 #define SPTTIMEOUT 80
@@ -265,6 +266,9 @@ int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, stru
     Gnuplot g_down;
     vector<double> vec1;
     vector<double> vec2;
+    unsigned int waveno=0;
+    unsigned int wavenorecv;
+    unsigned int wavewrongcount=0;
     while(1){
         count=0;
         do {
@@ -278,9 +282,12 @@ int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, stru
             else if(ures>0){
                 if(FD_ISSET(udpfd, &udpreadset)){
                     readlen=recvfrom(udpfd, buf, PKTBUFSIZE, 0, (sockaddr*)udpaddr, &udpaddrlen);
-                    if(readlen==PKTBUFSIZE){
+                    memcpy(&wavenorecv,buf, sizeof(int));
+                    if(readlen==PKTBUFSIZE&&waveno==wavenorecv){
                         count++;
                     }
+                    else if(waveno!=wavenorecv)
+                        wavewrongcount++;
                     else if(readlen>0){
                         printf("%d Partial reception???\n", readlen);
                     }
@@ -292,6 +299,7 @@ int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, stru
             tres = select(sfd + 1, &tcpreadset, NULL, NULL, &tv0);
 
         } while ((tres==-1 &&errno==EINTR)||tres == 0);
+        waveno++;
         ticknow=std::chrono::system_clock::now();
         //process http packet if
         memset(msgbuf,0 ,BUFFSIZE);
@@ -359,16 +367,18 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
     int intadjcount=0;
     int waveloss=0;
     double sumtime=0;
-    int temp=1000;
+    int temp=WAVEQUOTE;
     int quote;
     int feedback;
     int sentl=0;
+    int countzeros=0;
     double rate=0;
     string proceedstr="proceed";
     string testu="testu";
     string endstr="end";
     double adaptivesleep=DEFINTERVAL;
     Plotter pu;
+    unsigned int waveno=0;
     pu.setTitle("Upload");
     vector<double> vec1;
     vector<double> vec2;
@@ -379,6 +389,8 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
     while(diff.count()<timeout){//default timeout 30s
         quote=temp;
         auto tick1=std::chrono::system_clock::now();
+        //printf("%f\n",adaptivesleep);
+        memcpy(ubuf,&waveno, sizeof(int));
         while(quote>0){
             sentl=sendto(udpfd,ubuf,PKTBUFSIZE,0,(sockaddr*)addr, socklen);
             if(sentl<=0) {
@@ -389,11 +401,11 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
                 quote--;
             }
             std::this_thread::sleep_for(std::chrono::microseconds((int)adaptivesleep));
-            //usleep(adaptivesleep);
         }
+        waveno++;
         auto tick2=std::chrono::system_clock::now();
-        diff2 = tick2-tick1;
-        sumtime+=diff2.count();
+        //diff2 = tick2-tick1;
+        //sumtime+=diff2.count();
         //send current sent quote to tcp socket
         memset(msg,0,BUFFSIZE);
         if((sendto(streamfd, testu.c_str(), strlen(testu.c_str()), 0, NULL, 0))<0){
@@ -410,6 +422,8 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
             return -1;
         }
         //get result;
+        diff2 = tick2-tick1;
+        sumtime+=diff2.count();
         memcpy(&feedback,msg, sizeof(feedback));
         //compute loss;
         waveloss=temp-feedback;
@@ -426,29 +440,38 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
         g_up.send1d(make_pair(vec1,vec2));
         g_up.flush();
         loss+=waveloss;
-        if(feedback>temp){
+        /*if(feedback>temp){
             printf("Some packet out of sequence\n");
-        }
+            adaptivesleep=adaptivesleep*1.1;
+            countzeros=0;
+        }*/
         if(waveloss>=0){
-            lossbalance=lossbalance+(waveloss-lossbalance)/8;
+            lossbalance=lossbalance+(waveloss-lossbalance)/4;
         }
         //adjust timer
-        if(lossbalance>DROPTHRESHOLD*temp && waveloss>DROPTHRESHOLD*temp&& intadjcount<INTAJDTHRESHOLD){
-            adaptivesleep*=2;
-            intadjcount++;
-        }
         if(lossbalance>DROPTHRURGENT*temp && waveloss>DROPTHRURGENT*temp&& intadjcount<INTAJDTHRESHOLD){
-            adaptivesleep*=8;
+            adaptivesleep*=2;
+            intadjcount+=2;
+        }
+        else if(lossbalance>DROPTHRESHOLD*temp && waveloss>DROPTHRESHOLD*temp&& intadjcount<INTAJDTHRESHOLD){
+            adaptivesleep*=1.4;
             intadjcount++;
         }
+
         if(waveloss==0){
+            countzeros++;
             if(intadjcount>0)
                 intadjcount--;
-            if(adaptivesleep>BASEINTERVAL*1.2)
-                adaptivesleep=adaptivesleep/1.2;
-            else
-                adaptivesleep=BASEINTERVAL;
-        }
+            if(countzeros>=3){
+                if(adaptivesleep>BASEINTERVAL*1.1)
+                    adaptivesleep=adaptivesleep/1.1;
+                else
+                    adaptivesleep=BASEINTERVAL;
+                countzeros=0;
+            }
+
+        } else
+            countzeros=0;
         end=std::chrono::system_clock::now();
         diff=end-start;
         //printf("%f\n", diff.count());
@@ -620,7 +643,7 @@ int main(int argc, char *argv[]) {
         fputs(timechar,f);
     }
     //activate speedtest client
-    int timeout=80;
+    int timeout=240;
     struct speedtestdata* sptd= new struct speedtestdata;
     sptd->servname=servname;
     sptd->dltimeout=timeout;
