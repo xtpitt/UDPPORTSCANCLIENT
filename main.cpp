@@ -26,7 +26,7 @@
 #define DROPTHRESHOLD 0.01
 #define DROPTHRURGENT 0.02
 #define INTAJDTHRESHOLD 8
-#define BASEINTERVAL 80
+#define BASEINTERVAL 50
 #define DEFINTERVAL 1000
 #define SPTTIMEOUT 80
 #define PORTALLO 10
@@ -240,16 +240,6 @@ void randpayloadset(char* payload, size_t len){
         *(payload+i)=(char)(rand()%256);
     }
 }
-int upltestthread(struct upltestdata *uptd){
-    int fd=uptd->fd;
-    sockaddr_in addr=uptd->addr;
-    socklen_t socklen= sizeof(addr);
-    int sfd=uptd->sfd;
-    bool go_on=true;
-
-    return 0;
-
-}
 int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, struct timeval tv0){
     int readlen=0, count=0;
     char buf[PKTBUFSIZE];
@@ -372,6 +362,7 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
     int feedback;
     int sentl=0;
     int countzeros=0;
+    int countnzeros=0;
     double rate=0;
     string proceedstr="proceed";
     string testu="testu";
@@ -427,7 +418,8 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
         memcpy(&feedback,msg, sizeof(feedback));
         //compute loss;
         waveloss=temp-feedback;
-        //pu.appendData(sumtime,feedback*8/diff2.count());
+        //DEBUG
+        //printf("feedback %d, waveloss %d, waveno %d, adaptivesleep %f\n",feedback, waveloss, waveno-1,adaptivesleep);
         timeline=tick2-start;
         vec1.push_back(timeline.count());
         vec2.push_back(feedback*8/diff2.count());
@@ -460,6 +452,7 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
 
         if(waveloss==0){
             countzeros++;
+            countnzeros=0;
             if(intadjcount>0)
                 intadjcount--;
             if(countzeros>=3){
@@ -467,11 +460,17 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
                     adaptivesleep=adaptivesleep/1.1;
                 else
                     adaptivesleep=BASEINTERVAL;
-                countzeros=0;
+                countzeros--;
             }
 
-        } else
-            countzeros=0;
+        } else{
+            countzeros=-5;
+            countnzeros++;
+            if(countnzeros>=3){
+                adaptivesleep=adaptivesleep*1.1;
+                countzeros-=2;
+            }
+        }
         end=std::chrono::system_clock::now();
         diff=end-start;
         //printf("%f\n", diff.count());
