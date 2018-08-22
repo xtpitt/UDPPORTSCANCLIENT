@@ -32,10 +32,12 @@
 #define PORTALLO 10
 using namespace std;
 int portscanstatus=-1;//only -1, 0, 1 is in use.
+int printing=0;
 /*
  * -1: portscan not yet start
  * 0:  portscan ended
  * 1:  portscan begin
+ * 2:  printing
  * */
 struct portscandata{
     int port;
@@ -59,29 +61,15 @@ struct dnltestdata{
     int sfd;
     int fd;
 };
-class Plotter{
-private:
-    vector<double> vec1;
-    vector<double> vec2;
-    int count=500;
-    string title;
-public:
-    void setTitle(string s){
-        this->title=s;
-    }
-    pair<vector<double>, vector<double>> getPlotData(){
-        return make_pair(vec1,vec2);
-    };
-    void appendData(double data1, double data2){
-        int l=vec1.size();
-        if(l==count){
-            vec1.erase(vec1.begin());
-            vec2.erase(vec2.begin());
-        }
-        vec1.push_back(data1);
-        vec2.push_back(data2);
-    }
-};
+void printpscresult(int count, int total, double totaldelay, double jitter){
+    while(printing!=0){}
+    printing=1;
+    printf("%d/%d ports reported open.\n", count, total);
+    printf("Average Delay: %fms.\n", totaldelay/count);
+    printf("Average Jitter: %fms.\n", jitter/count);
+    printf("Scanning Request Ends.\n");
+    printing=0;
+}
 int portscanclient(struct portscandata* psd){
     int fd,streamfd;
     FILE *f=psd->f;
@@ -223,10 +211,7 @@ int portscanclient(struct portscandata* psd){
             break;
     }
 
-    printf("%d/%d ports reported open.\n", count, total);
-    printf("Average Delay: %fms.\n", totaldelay/count);
-    printf("Average Jitter: %fms.\n", jitter/count);
-    printf("Scanning Request Ends.\n");
+    printpscresult(count, total, totaldelay, jitter);
     portscanstatus=0;
     fputs(end.c_str(),f);
     fclose(f);
@@ -234,6 +219,7 @@ int portscanclient(struct portscandata* psd){
     delete test;
     return 0;
 }
+
 void randpayloadset(char* payload, size_t len){
     srand(time(NULL));
     for(int i=0; i<len;++i){
@@ -323,10 +309,13 @@ int speedtestrecv_c(int udpfd, sockaddr_in* udpaddr, int sfd, char* msgbuf, stru
             memcpy(&rate, msgbuf, sizeof(rate));
             memcpy(&lossrate, msgbuf+sizeof(rate), sizeof(lossrate));
             char output[BUFFSIZE];
+            while(printing!=0){}
+            printing=1;
             sprintf((char*)output,"Download Rate: %f kbps.\n", rate);
             printf(output);
             sprintf((char*)output,"Download packet loss rate %f.\n", lossrate);
             printf(output);
+            printing=0;
             break;
         }
         vec1.push_back(timeline);
@@ -368,9 +357,7 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
     string testu="testu";
     string endstr="end";
     double adaptivesleep=DEFINTERVAL;
-    Plotter pu;
     unsigned int waveno=0;
-    pu.setTitle("Upload");
     vector<double> vec1;
     vector<double> vec2;
     printf("Entering upload testing cycle.\n");
@@ -420,6 +407,7 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
         waveloss=temp-feedback;
         //DEBUG
         //printf("feedback %d, waveloss %d, waveno %d, adaptivesleep %f\n",feedback, waveloss, waveno-1,adaptivesleep);
+        //printf("test time: %f, timeline %f\n", diff2.count(), timeline.count());
         timeline=tick2-start;
         vec1.push_back(timeline.count());
         vec2.push_back(feedback*8/diff2.count());
@@ -491,10 +479,13 @@ int speedtestsend_c(int udpfd, sockaddr_in* addr, int streamfd, char* msg,int ti
 
     rate=count*8/sumtime;
     char output[BUFFSIZE];
+    while(printing!=0){}
+    printing=1;
     sprintf((char*)output,"Upload Rate: %f kbps.\n", rate);
     printf(output);
     sprintf((char*)output,"Upload packet loss rate %f.\n", (double)loss/count);
     printf(output);
+    printing=0;
 }
 int speedtestclient(struct speedtestdata* psd){
     int streamfd;
@@ -642,12 +633,8 @@ int main(int argc, char *argv[]) {
         fputs(timechar,f);
     }
     //activate speedtest client
-    int timeout=240;
-    struct speedtestdata* sptd= new struct speedtestdata;
-    sptd->servname=servname;
-    sptd->dltimeout=timeout;
-    std::thread sptclient(speedtestclient, sptd);
-    sptclient.join();
+
+
     //activate portscanclient
     struct portscandata* psd= new struct portscandata;
     psd->port=port;
@@ -655,5 +642,15 @@ int main(int argc, char *argv[]) {
     psd->servname=servname;
     psd->f=f;
     std::thread psclient(portscanclient,psd);
-    psclient.join();
+    psclient.detach();
+
+    int timeout=240;
+    struct speedtestdata* sptd= new struct speedtestdata;
+    sptd->servname=servname;
+    sptd->dltimeout=timeout;
+    std::thread sptclient(speedtestclient, sptd);
+    sptclient.join();
+    while(portscanstatus!=0&&portscanstatus!=-1){
+        //hold not end.
+    }
 }
